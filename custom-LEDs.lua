@@ -34,10 +34,9 @@ function GetProperties()
 			Max = 256
         },
         {
-            Name = "LED mode",
-            Type = "enum",
-            Choices = {"Standard on/off", "Manual (Specify on/off colors)"},
-            Value = "Standard on/off"
+            Name = "Custom Off Colors",
+            Type = "boolean",
+            Value = "false"
         }
 	}
 	return props
@@ -78,7 +77,7 @@ function GetControls(props)
             UserPin = true
         }
     }
-    if props["LED mode"].Value == "Manual (Specify on/off colors)" then
+    if props["Custom Off Colors"].Value then
         table.insert(ctls, {
             Name = "OffColors",
             ControlType = "Text",
@@ -154,7 +153,7 @@ function GetControlLayout(props)
 		ZOrder = 16
 	}
     local x, y = 162, 106
-    if props["LED mode"].Value == "Manual (Specify on/off colors)" then
+    if props["Custom Off Colors"].Value then
         table.insert(
             graphics, {
                 Type = "Text",
@@ -180,7 +179,7 @@ function GetControlLayout(props)
         }
         y = 126
     end
-    local sizeY = props["LED mode"].Value == "Manual (Specify on/off colors)" and 110 or 90
+    local sizeY = props["Custom Off Colors"].Value and 110 or 90
     table.insert(
         graphics, {
             Type = "GroupBox",
@@ -227,7 +226,7 @@ function GetControlLayout(props)
 		ZOrder = 1
         }
     )
-    if props["LED mode"].Value == "Manual (Specify on/off colors)" then
+    if props["Custom Off Colors"].Value then
         table.insert(
             graphics, {
             Type = "Text",
@@ -274,7 +273,7 @@ function GetControlLayout(props)
 			StrokeColor = Colors.Stroke,
 			StrokeWidth = 1
         }
-        if props["LED mode"].Value == "Manual (Specify on/off colors)" then
+        if props["Custom Off Colors"].Value then
             layout["OffColors "..tostring(i)] = {
                 PrettyName = "Off Colors~Room " .. tostring(i),
                 Style = "Text",
@@ -296,4 +295,172 @@ function GetControlLayout(props)
 
 	
 	return layout, graphics
+end
+
+if Controls then
+
+    --[[ ******************************* ]]--
+	--[[ ******* Global Variables ****** ]]--
+    --[[ ******************************* ]]--
+    
+    roomCombinerNames = {}
+    for i, v in pairs(Component.GetComponents()) do
+		if v.Type == "room_combiner" then
+			table.insert(roomCombinerNames, v.Name)
+		end
+    end
+    
+    Controls.RoomCombineTarget.Choices = roomCombinerNames
+    
+	rooms = {} -- key = room number, value = table of LED controls (color shows group membership), color Text Box controls, LEDs
+	groups = {} -- sort of reverse table of rooms[room][group] info. Keys are group names (LED colors), Values are room numbers that are members of that group.
+	walls = {} -- key = index, value = control
+
+    --[[ ******************************* ]]--
+	--[[ ********** Functions ********** ]]--
+    --[[ ******************************* ]]--
+    
+    function UpdateStatus(val, msg) -- Updates status, "val" can be passed a number or string.
+		if type(val) == "string" then
+			val = val == "OK" and 0 or val
+			val = val == "Compromised" and 1 or val
+			val = val == "Fault" and 2 or val
+			val = val == "Not Present" and 3 or val
+			val = val == "Missing" and 4 or val
+			val = val == "Initializing" and 5 or val
+			if type(val) ~= "number" then
+				error("UpdateStatus val is incorrectly formatted: Expecting integer 0-5 or valid status string, Received: "..val)
+			end
+		end
+		Controls.Status.Value = val
+		if msg ~= nil then
+			Controls.Status.String = msg
+		end
+    end
+    
+    function IsComponentValid(name)  -- returns true or false if a named component is found.
+		return #Component.GetControls(name) ~= 0 and true or false
+    end
+    
+    function UpdateTextBoxColor(ctl, valid) -- Updates textbox color
+        valid = ctl.String == "" or valid -- Textbox is white if the Text box is blank.
+		ctl.Color = valid and "White" or "Red"  -- Textbox is white if the entry is valid, red if it's not valid.
+    end
+    
+    function UpdateGroupsTable() 
+        groups = {}
+        local groupNo = 0 -- Room Number of the first room in a group
+        for room, t in ipairs(rooms) do
+            if groupNo == 0 or t.LEDs.Color ~= rooms[groupNo].LEDs.Color then -- If there's no GroupNo or the color is different
+                groupNo = room
+            end
+
+            rooms[room]["groupNo"] = groupNo
+
+            if groups["groupNo"] == nil then
+                groups["groupNo"] = {room}
+            else
+                table.insert(groups["groupNo"], room)
+            end
+        end
+    end
+    
+    function UpdateLEDs()
+        for room, roomTbl in ipairs(rooms) do
+            if roomTbl.rcLED.Boolean then -- the room is combined - set it to the on state
+                if Properties["Custom Off Colors"].Value then
+                    roomTbl.myLED.Color = rooms[roomTbl.groupNo].myColor.String
+                else
+                    roomTbl.myLED.Boolean = true
+                end
+            else
+                if Properties["Custom Off Colors"].Value then
+                    roomTbl.myLED.Color = roomTbl.myOffColor.String
+                else
+                    roomTbl.myLED.Boolean = false
+                end
+            end
+        end
+    end
+
+    function WallHasChanged() -- Room Combiner Walls Control EventHandler Function
+        UpdateGroupsTable()
+        UpdateLEDs()
+    end
+    
+    function GetFirstRoom(group) -- returns the first room number
+        table.sort(group)
+        return #group > 0 and group[1] or false
+    end
+    
+    function ColorChange(ctl)
+        print("Color changed to "..ctl.String)
+    end
+
+    function InitialiseAll()
+		UpdateStatus("Initializing")
+		
+		local componentValid = IsComponentValid(Controls.RoomCombineTarget.String) --Check Room Combiner Component Exists
+		UpdateTextBoxColor(Controls.RoomCombineTarget, componentValid)
+
+		if componentValid then
+			roomCombiner = Component.New(Controls.RoomCombineTarget.String)
+
+            for room = 1, Properties.Rooms.Value do -- Initialise rooms table with plugin controls
+                rooms[room] = {}
+                rooms[room]["myLED"] = Controls.LEDs[room]
+                rooms[room]["myColor"] = Control.Colors[room]
+                if Properties["Custom Off Colors"].Value then
+                    rooms[room]["myOffColor"] = Controls.OffColors[room]
+                end
+            end
+
+			for name, control in pairs(roomCombiner) do -- Initialise room combiner controls
+				if name:find("output%.%d+%.combined") then
+                    local room = tonumber(name:match("output%.(%d+)%.combined"))
+                    if room <= Properties.Rooms.Value then
+                        rooms[room]["rcLED"] = control
+                        rooms[room]["group"] = control.Color
+                    else
+                        UpdateStatus("Fault", "Room Combiner number of rooms does not match this plugin - Room Combiner: "..tostring(roomCombinerRoomQty)..", This Plugin: "..tostring(Properties.Rooms.Value))
+                    end
+					
+				elseif name:find("wall%.%d+%.open") then -- Add each wall's open button into an array and assign eventhandler to watch it
+					local wall = tonumber(name:match("wall%.(%d+)%.open"))
+					walls[wall] = control
+					control.EventHandler = function() 
+						WallHasChanged()
+					end
+				end
+			end
+
+            WallHasChanged()		
+		
+			if Controls.Status.String == "Initializing" then -- Finished initialising with no faults, update status to OK.
+                UpdateStatus("OK")
+                --SyncroniseAllGroups()
+			end
+		else
+            UpdateStatus("Fault", "Room Combiner target not a valid component. Check component name and try again.")
+		end
+	end
+
+	--Run all eventhandler code on startup:
+	InitialiseAll()
+
+    for i = 1, Properties.rooms.Value do
+        Controls.Colors.EventHandler = ColorChange
+        if Properties["Custom Off Colors"].Value then
+            Controls.OffColors.EventHandler = WallHasChanged
+        end
+    end
+
+    if Properties["Custom Off Colors"].Value then
+        Controls["LED State"].EventHandler = function()
+            for room, roomTbl in ipairs(rooms) do
+                roomTbl.myLED.Boolean = Controls["LED State"].boolean
+            end
+            WallHasChanged()
+        end
+    end
 end
